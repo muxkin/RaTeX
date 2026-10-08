@@ -24,6 +24,10 @@ cargo test --workspace
 
 CI runs the same checks (`.github/workflows/ci.yml`) after installing GTK dependencies. The local pre-commit hook skips only `ratex-gtk4` when GTK4/graphene `pkg-config` files are missing, while still linting the rest of the workspace.
 
+Forks run the normal CI without requiring a GitHub Pages site. To enable website
+deployment in a fork, configure Pages for GitHub Actions and set the repository
+variable `RATEX_ENABLE_PAGES=true`; the upstream repository deploys as usual.
+
 ## Golden (visual) tests
 
 Reference PNGs live under `tests/golden/fixtures/`. Regenerate RaTeX outputs with:

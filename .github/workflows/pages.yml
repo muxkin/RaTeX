@@ -16,6 +16,8 @@ concurrency:
 
 jobs:
   build:
+    # Forks do not inherit the upstream Pages site. Deploy only after opting in.
+    if: github.repository == 'erweixin/RaTeX' || vars.RATEX_ENABLE_PAGES == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
