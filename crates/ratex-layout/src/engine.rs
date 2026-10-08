@@ -22,6 +22,22 @@ use crate::stacked_delim::make_stacked_delim_if_needed;
 /// KaTeX wraps every `\frac` / `\atop` in mopen+mclose nulldelimiter spans of this width.
 const NULL_DELIMITER_SPACE: f64 = 0.12;
 
+/// Offer adjacent literal text leaves as one shaping run to the host.
+fn external_text_prefix(
+    nodes: &[ParseNode],
+    options: &LayoutOptions,
+) -> Option<(LayoutBox, usize)> {
+    let host = options.text_layout?;
+    let count=nodes.iter().take_while(|n| matches!(n,
+        ParseNode::TextOrd{mode:Mode::Text,..} | ParseNode::MathOrd{mode:Mode::Text,..}
+        | ParseNode::OrdGroup{mode:Mode::Text,..} | ParseNode::Accent{mode:Mode::Text,..}) || matches!(n,
+        ParseNode::SpacingNode{mode:Mode::Text,text,..} if matches!(text.as_str()," "|"~"|"\\ "|"\\space"|"\\nobreakspace"))).count();
+    if count == 0 {
+        return None;
+    }
+    host.layout(&nodes[..count], options).map(|b| (b, count))
+}
+
 fn style_str_to_math_style(style: &StyleStr) -> MathStyle {
     match style {
         StyleStr::Display => MathStyle::Display,
@@ -106,8 +122,11 @@ fn layout_expression(
     // Index of the last node that contributed `prev_class` (for `\middle` glue suppression).
     let mut prev_class_node_idx: Option<usize> = None;
 
-    for (i, node) in nodes.iter().enumerate() {
-        let lbox = layout_node(node, options);
+    let mut i = 0;
+    while i < nodes.len() {
+        let node = &nodes[i];
+        let (lbox, consumed) = external_text_prefix(&nodes[i..], options)
+            .unwrap_or_else(|| (layout_node(node, options), 1));
         let cur_class = eff_classes.get(i).copied().flatten();
 
         if is_real_group {
@@ -142,6 +161,7 @@ fn layout_expression(
         }
 
         children.push(lbox);
+        i += consumed;
     }
 
     make_hbox(children)
@@ -208,6 +228,9 @@ fn layout_multiline(
 
 /// Lay out a single ParseNode.
 fn layout_node(node: &ParseNode, options: &LayoutOptions) -> LayoutBox {
+    if let Some((text, _)) = external_text_prefix(std::slice::from_ref(node), options) {
+        return text;
+    }
     match node {
         ParseNode::MathOrd { text, mode, .. } => layout_symbol(text, *mode, options),
         ParseNode::TextOrd { text, mode, .. } => layout_symbol(text, *mode, options),
@@ -448,18 +471,27 @@ fn layout_node(node: &ParseNode, options: &LayoutOptions) -> LayoutBox {
 
         ParseNode::Text {
             body, font, mode, ..
-        } => match font.as_deref() {
-            Some(f) => {
-                let group = ParseNode::OrdGroup {
-                    mode: *mode,
-                    body: body.clone(),
-                    semisimple: None,
-                    loc: None,
-                };
-                layout_font(f, &group, options)
+        } => {
+            let text_options = options.with_text_font(font.as_deref());
+            let options = &text_options;
+            if let Some(host) = options.text_layout {
+                if let Some(text) = host.layout(body, options) {
+                    return text;
+                }
             }
-            None => layout_text(body, options),
-        },
+            match font.as_deref() {
+                Some(f) => {
+                    let group = ParseNode::OrdGroup {
+                        mode: *mode,
+                        body: body.clone(),
+                        semisimple: None,
+                        loc: None,
+                    };
+                    layout_font(f, &group, options)
+                }
+                None => layout_text(body, options),
+            }
+        }
 
         ParseNode::Font { font, body, .. } => layout_font(font, body, options),
 
@@ -3691,7 +3723,14 @@ fn make_text_runs(children: Vec<LayoutBox>, color: Color, inter_glyph_kern: f64)
 /// Lay out `\text{…}` / `HBox` contents as positioned glyph runs.
 fn layout_text(body: &[ParseNode], options: &LayoutOptions) -> LayoutBox {
     let mut children = Vec::new();
-    for node in body {
+    let mut i = 0;
+    while i < body.len() {
+        if let Some((text, consumed)) = external_text_prefix(&body[i..], options) {
+            children.push(text);
+            i += consumed;
+            continue;
+        }
+        let node = &body[i];
         match node {
             ParseNode::TextOrd { text, mode, .. } | ParseNode::MathOrd { text, mode, .. } => {
                 children.push(layout_symbol(text, *mode, options));
@@ -3703,6 +3742,7 @@ fn layout_text(body: &[ParseNode], options: &LayoutOptions) -> LayoutBox {
                 children.push(layout_node(node, options));
             }
         }
+        i += 1;
     }
     make_text_runs(children, options.color, 0.0)
 }
@@ -4061,6 +4101,8 @@ fn layout_angl(body: &ParseNode, options: &LayoutOptions) -> LayoutBox {
 }
 
 fn layout_font(font: &str, body: &ParseNode, options: &LayoutOptions) -> LayoutBox {
+    let text_options = options.with_text_font(Some(font));
+    let options = &text_options;
     if matches!(font, "text" | "\\text") {
         return match body {
             ParseNode::OrdGroup { body, .. } => layout_text(body, options),
@@ -4094,12 +4136,34 @@ fn layout_font(font: &str, body: &ParseNode, options: &LayoutOptions) -> LayoutB
 }
 
 fn layout_with_font(node: &ParseNode, font_id: FontId, options: &LayoutOptions) -> LayoutBox {
+    if let Some((text, _)) = external_text_prefix(std::slice::from_ref(node), options) {
+        return text;
+    }
+    if let ParseNode::OrdGroup {
+        body: children,
+        mode: Mode::Text,
+        ..
+    } = node
+    {
+        if let Some(host) = options.text_layout {
+            if let Some(text) = host.layout(children, options) {
+                return text;
+            }
+        }
+    }
     match node {
         ParseNode::OrdGroup { body, .. } => {
-            let children = body
-                .iter()
-                .map(|node| layout_with_font(node, font_id, options))
-                .collect();
+            let mut children = Vec::new();
+            let mut i = 0;
+            while i < body.len() {
+                if let Some((text, consumed)) = external_text_prefix(&body[i..], options) {
+                    children.push(text);
+                    i += consumed;
+                } else {
+                    children.push(layout_with_font(&body[i], font_id, options));
+                    i += 1;
+                }
+            }
             make_text_runs(children, options.color, options.inter_glyph_kern_em)
         }
         ParseNode::SupSub { base, sup, sub, .. } => {

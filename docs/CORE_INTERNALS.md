@@ -3,6 +3,9 @@
 This guide describes private implementation modules. Public Rust import paths,
 AST and layout types, C ABI and DisplayList JSON remain unchanged.
 
+The optional [host text layout API](HOST_TEXT_LAYOUT.md) is documented separately;
+`LayoutOptions` carries the lifetime of its borrowed callback when used.
+
 ## Same-machine refactor acceptance
 
 The ignored `refactor_compatibility` integration test captures all three golden
